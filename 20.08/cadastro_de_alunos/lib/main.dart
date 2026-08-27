@@ -1,8 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'firebase_options.dart';
 
-// Ponto de entrada do app: toda aplicação Flutter começa aqui.
-void main() {
-  runApp(const MeuApp());
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  runApp(const MyApp());
 }
 
 // Widget raiz do aplicativo. É "Stateless" porque ele mesmo nunca muda,
@@ -15,27 +19,23 @@ class MeuApp extends StatelessWidget {
     return MaterialApp(
       title: 'Cadastro de Alunos',
       debugShowCheckedModeBanner: false, // tira a faixa "DEBUG" do canto
-      theme: ThemeData(
-        primarySwatch: Colors.pink,
-        useMaterial3: true,
-      ),
+      theme: ThemeData(primarySwatch: Colors.pink, useMaterial3: true),
       home: const CadastroAlunosPage(),
     );
   }
 }
 
-// "Modelo" do aluno: uma classe simples que agrupa nome, idade e curso
-// numa única "caixinha" de dados, em vez de usar 3 listas soltas.
-class Aluno {
-  final String nome;
-  final String idade;
-  final String curso;
-
-  Aluno({required this.nome, required this.idade, required this.curso});
+// Compatibilidade com o nome padrão do template Flutter.
+class MyApp extends MeuApp {
+  const MyApp({super.key});
 }
 
-// Tela principal. É "Stateful" porque a lista de alunos muda
-// conforme o usuário cadastra novos alunos.
+// Referência para a coleção "alunos" no Firestore.
+final CollectionReference alunosCollection =
+    FirebaseFirestore.instance.collection('alunos');
+
+// Tela principal. É "Stateful" porque os campos de texto mudam,
+// mas a lista de alunos agora vem direto do Firestore em tempo real.
 class CadastroAlunosPage extends StatefulWidget {
   const CadastroAlunosPage({super.key});
 
@@ -49,11 +49,9 @@ class _CadastroAlunosPageState extends State<CadastroAlunosPage> {
   final TextEditingController _idadeController = TextEditingController();
   final TextEditingController _cursoController = TextEditingController();
 
-  // Lista que guarda todos os alunos cadastrados.
-  final List<Aluno> _alunos = [];
-
   // Função chamada quando o botão "Cadastrar" é clicado.
-  void _cadastrarAluno() {
+  // Agora grava o aluno direto no Firestore, em vez de numa lista local.
+  Future<void> _cadastrarAluno() async {
     final nome = _nomeController.text.trim();
     final idade = _idadeController.text.trim();
     final curso = _cursoController.text.trim();
@@ -66,22 +64,23 @@ class _CadastroAlunosPageState extends State<CadastroAlunosPage> {
       return;
     }
 
-    // setState avisa o Flutter: "algo mudou, redesenhe a tela".
-    setState(() {
-      _alunos.add(Aluno(nome: nome, idade: idade, curso: curso));
-
-      // Limpa os campos depois de cadastrar, pra facilitar o próximo.
-      _nomeController.clear();
-      _idadeController.clear();
-      _cursoController.clear();
+    // add() cria um novo documento na coleção "alunos" com um ID automático.
+    await alunosCollection.add({
+      'nome': nome,
+      'idade': idade,
+      'curso': curso,
+      'criadoEm': FieldValue.serverTimestamp(),
     });
+
+    // Limpa os campos depois de cadastrar, pra facilitar o próximo.
+    _nomeController.clear();
+    _idadeController.clear();
+    _cursoController.clear();
   }
 
-  // Função pra remover um aluno da lista (bônus, não pedido mas útil).
-  void _removerAluno(int index) {
-    setState(() {
-      _alunos.removeAt(index);
-    });
+  // Remove o aluno do Firestore usando o ID do documento.
+  Future<void> _removerAluno(String docId) async {
+    await alunosCollection.doc(docId).delete();
   }
 
   // Boa prática: limpar os controllers quando a tela for destruída,
@@ -97,9 +96,7 @@ class _CadastroAlunosPageState extends State<CadastroAlunosPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Cadastro de Alunos'),
-      ),
+      appBar: AppBar(title: const Text('Cadastro de Alunos')),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Column(
@@ -157,33 +154,54 @@ class _CadastroAlunosPageState extends State<CadastroAlunosPage> {
             ),
             const SizedBox(height: 8),
 
-            // Lista de alunos. Expanded faz ela ocupar o espaço restante
-            // da tela, senão o Column não sabe quanto espaço dar pra ela.
+            // StreamBuilder "escuta" a coleção no Firestore. Toda vez que
+            // um aluno é adicionado ou removido em qualquer dispositivo,
+            // essa lista atualiza sozinha, em tempo real.
             Expanded(
-              child: _alunos.isEmpty
-                  ? const Center(
+              child: StreamBuilder<QuerySnapshot>(
+                stream: alunosCollection.orderBy('criadoEm').snapshots(),
+                builder: (context, snapshot) {
+                  if (snapshot.hasError) {
+                    return Center(child: Text('Erro: ${snapshot.error}'));
+                  }
+
+                  if (snapshot.connectionState == ConnectionState.waiting) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+
+                  final docs = snapshot.data?.docs ?? [];
+
+                  if (docs.isEmpty) {
+                    return const Center(
                       child: Text(
                         'Nenhum aluno cadastrado ainda.',
                         style: TextStyle(color: Colors.grey),
                       ),
-                    )
-                  : ListView.builder(
-                      itemCount: _alunos.length,
-                      itemBuilder: (context, index) {
-                        final aluno = _alunos[index];
-                        return Card(
-                          child: ListTile(
-                            title: Text(aluno.nome),
-                            subtitle: Text(
-                                'Idade: ${aluno.idade} | Curso: ${aluno.curso}'),
-                            trailing: IconButton(
-                              icon: const Icon(Icons.delete, color: Colors.red),
-                              onPressed: () => _removerAluno(index),
-                            ),
+                    );
+                  }
+
+                  return ListView.builder(
+                    itemCount: docs.length,
+                    itemBuilder: (context, index) {
+                      final doc = docs[index];
+                      final data = doc.data() as Map<String, dynamic>;
+
+                      return Card(
+                        child: ListTile(
+                          title: Text(data['nome'] ?? ''),
+                          subtitle: Text(
+                            'Idade: ${data['idade']} | Curso: ${data['curso']}',
                           ),
-                        );
-                      },
-                    ),
+                          trailing: IconButton(
+                            icon: const Icon(Icons.delete, color: Colors.red),
+                            onPressed: () => _removerAluno(doc.id),
+                          ),
+                        ),
+                      );
+                    },
+                  );
+                },
+              ),
             ),
           ],
         ),
